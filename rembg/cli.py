@@ -3,11 +3,12 @@ import sys
 import time
 from enum import Enum
 from typing import IO, cast
-
+import base64
 import aiohttp
 import click
 import filetype
 import uvicorn
+
 from asyncer import asyncify
 from fastapi import Depends, FastAPI, File, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,9 +16,9 @@ from starlette.responses import Response
 from tqdm import tqdm
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
-
+from fastapi.responses import ORJSONResponse
 from . import _version
-from .bg import remove
+from .bg import remove, make_thumbnail
 from .session_base import BaseSession
 from .session_factory import new_session
 
@@ -383,7 +384,7 @@ def s(port: int, log_level: str, threads: int) -> None:
     def im_without_bg(content: bytes, commons: CommonQueryParams) -> Response:
         return Response(
             remove(
-                content,
+                content, 
                 session=sessions.setdefault(
                     commons.model.value, new_session(commons.model.value)
                 ),
@@ -396,7 +397,29 @@ def s(port: int, log_level: str, threads: int) -> None:
             ),
             media_type="image/png",
         )
-
+    def im_without_bg_base64(content: bytes, commons: CommonQueryParams) -> ORJSONResponse:
+        base64_image = remove(
+                            content, 
+                            session=sessions.setdefault(
+                                commons.model.value, new_session(commons.model.value)
+                            ),
+                            alpha_matting=commons.a,
+                            
+                            alpha_matting_foreground_threshold=commons.af,
+                            alpha_matting_background_threshold=commons.ab,
+                            alpha_matting_erode_size=commons.ae,
+                            only_mask=commons.om,
+                            post_process_mask=commons.ppm,
+                        )
+        
+        payload = {
+            "mime": "plain/text",
+            # base64_image,
+            "image": base64.b64encode(base64_image.read()).decode("utf-8"),
+            "success": True,
+        }
+        return ORJSONResponse(content=payload)
+        
     @app.on_event("startup")
     def startup():
         if threads is not None:
@@ -421,7 +444,41 @@ def s(port: int, log_level: str, threads: int) -> None:
             async with session.get(url) as response:
                 file = await response.read()
                 return await asyncify(im_without_bg)(file, commons)
-
+            
+    @app.get(
+        path="/resized-image",
+        tags=["Background Removal"],
+        summary="Remove from URL",
+        description="Removes the background from an image obtained by retrieving an URL.",
+    )
+    async def get_resized_image(
+        url: str = Query(
+            default=..., description="URL of the image that has to be processed."
+        ),
+        commons: CommonQueryParams = Depends(),
+    ):
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                file = await response.read()
+                img = make_thumbnail(file)
+                return await asyncify(im_without_bg)(img, commons)        
+    @app.get(
+        path="/resized-image-base64",
+        tags=["Background Removal"],
+        summary="Remove from URL",
+        description="Removes the background from an image obtained by retrieving an URL.",
+    )
+    async def get_resized_image_base64(
+        url: str = Query(
+            default=..., description="URL of the image that has to be processed."
+        ),
+        commons: CommonQueryParams = Depends(),
+    ):
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                file = await response.read()
+                img = make_thumbnail(file)
+                return await asyncify(im_without_bg_base64)(img, commons)
     @app.post(
         path="/",
         tags=["Background Removal"],
@@ -436,5 +493,42 @@ def s(port: int, log_level: str, threads: int) -> None:
         commons: CommonQueryPostParams = Depends(),
     ):
         return await asyncify(im_without_bg)(file, commons)
+       
+    @app.post(
+        path="/resized-image",
+        tags=["Background Removal"],
+        summary="Remove from Stream",
+        description="Removes the background from an image sent within the request itself.",
+    )
+    async def post_resized_image(
+        file: bytes = File(
+            default=...,
+            description="Image file (byte stream) that has to be processed.",
+        ),
+        commons: CommonQueryPostParams = Depends(),
+    ):
+        img = make_thumbnail(file)
+        return await asyncify(im_without_bg)(img, commons)
 
+    @app.post(
+        path="/resized-image-base64",
+        tags=["Background Removal"],
+        summary="Remove from Stream",
+        description="Removes the background from an image sent within the request itself.",
+    )
+    async def post_resized_image_base64(
+        file: bytes = File(
+            default=...,
+            description="Image file (byte stream) that has to be processed.",
+        ),
+        commons: CommonQueryPostParams = Depends(),
+    ):
+        # Convert bytes to NumPy array
+
+
+        # Convert NumPy array to OpenCV image
+        img = make_thumbnail(file)
+        return await asyncify(im_without_bg_base64)(img, commons)
+    
     uvicorn.run(app, host="0.0.0.0", port=port, log_level=log_level)
+    
