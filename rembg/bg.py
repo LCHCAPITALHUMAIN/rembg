@@ -1,16 +1,11 @@
 import io
 from enum import Enum
 from typing import List, Optional, Union
-
+import cv2
+import numba
 import numpy as np
-from cv2 import (
-    BORDER_DEFAULT,
-    MORPH_ELLIPSE,
-    MORPH_OPEN,
-    GaussianBlur,
-    getStructuringElement,
-    morphologyEx,
-)
+from io import BytesIO
+from cv2 import BORDER_DEFAULT, MORPH_ELLIPSE, MORPH_OPEN, IMREAD_UNCHANGED, GaussianBlur, getStructuringElement, morphologyEx, imdecode
 from PIL import Image
 from PIL.Image import Image as PILImage
 from pymatting.alpha.estimate_alpha_cf import estimate_alpha_cf
@@ -21,7 +16,8 @@ from scipy.ndimage import binary_erosion
 from .session_base import BaseSession
 from .session_factory import new_session
 
-kernel = getStructuringElement(MORPH_ELLIPSE, (3, 3))
+kernel = getStructuringElement(MORPH_ELLIPSE, (5, 5))
+
 
 
 class ReturnType(Enum):
@@ -37,6 +33,7 @@ def alpha_matting_cutout(
     background_threshold: int,
     erode_structure_size: int,
 ) -> PILImage:
+    """A dummy docstring."""
 
     if img.mode == "RGBA" or img.mode == "CMYK":
         img = img.convert("RGB")
@@ -54,7 +51,8 @@ def alpha_matting_cutout(
         )
 
     is_foreground = binary_erosion(is_foreground, structure=structure)
-    is_background = binary_erosion(is_background, structure=structure, border_value=1)
+    is_background = binary_erosion(
+        is_background, structure=structure, border_value=1)
 
     trimap = np.full(mask.shape, dtype=np.uint8, fill_value=128)
     trimap[is_foreground] = 255
@@ -74,26 +72,52 @@ def alpha_matting_cutout(
 
 
 def naive_cutout(img: PILImage, mask: PILImage) -> PILImage:
-    empty = Image.new("RGBA", (img.size), 0)
+    """A dummy docstring."""
+    empty = Image.new("RGBA", (img.size), (0, 0, 0, 0))
+    cutout = Image.composite(img, empty, mask)
+    return cutout
+
+
+def naive_cutout_new(img: PILImage, mask: PILImage) -> PILImage:
+    empty = Image.new("RGBA", (img.size), (0, 0, 0, 0))  # fill empty image with transparent pixels
     cutout = Image.composite(img, empty, mask)
     return cutout
 
 
 def get_concat_v_multi(imgs: List[PILImage]) -> PILImage:
+    """A dummy docstring."""
     pivot = imgs.pop(0)
     for im in imgs:
         pivot = get_concat_v(pivot, im)
     return pivot
 
 
-def get_concat_v(img1: PILImage, img2: PILImage) -> PILImage:
+def get_concat_v_multi_new(imgs: List[PILImage]) -> PILImage:
+    """A dummy docstring."""
+    arrays = [np.array(img) for img in imgs]
+    array = np.vstack(arrays)
+    concat_img = Image.fromarray(array)
+    return concat_img
+
+
+def get_concat_v_old(img1: PILImage, img2: PILImage) -> PILImage:
+    """A dummy docstring."""
     dst = Image.new("RGBA", (img1.width, img1.height + img2.height))
     dst.paste(img1, (0, 0))
     dst.paste(img2, (0, img1.height))
     return dst
 
 
-def post_process(mask: np.ndarray) -> np.ndarray:
+def get_concat_v(img1: PILImage, img2: PILImage) -> PILImage:
+    """A dummy docstring."""
+    array1 = np.array(img1)
+    array2 = np.array(img2)
+    array = np.vstack((array1, array2))
+    concat_img = Image.fromarray(array)
+    return concat_img
+
+
+def post_process_old(mask: np.ndarray) -> np.ndarray:
     """
     Post Process the mask for a smooth boundary by applying Morphological Operations
     Research based on paper: https://www.sciencedirect.com/science/article/pii/S2352914821000757
@@ -101,10 +125,61 @@ def post_process(mask: np.ndarray) -> np.ndarray:
         mask: Binary Numpy Mask
     """
     mask = morphologyEx(mask, MORPH_OPEN, kernel)
-    mask = GaussianBlur(mask, (5, 5), sigmaX=2, sigmaY=2, borderType=BORDER_DEFAULT)
-    mask = np.where(mask < 127, 0, 255).astype(np.uint8)  # convert again to binary
+    mask = GaussianBlur(mask, (5, 5), sigmaX=2, sigmaY=2,
+                        borderType=BORDER_DEFAULT)
+    mask = np.where(mask < 127, 0, 255).astype(
+        np.uint8)  # convert again to binary
     return mask
 
+
+# @numba.jit(nopython=True, parallel=True)
+def post_process(mask: np.ndarray) -> np.ndarray:
+    """A dummy docstring."""
+    
+    mask = morphologyEx(mask, MORPH_OPEN, kernel)
+    mask = GaussianBlur(mask, (5, 5), 2, 2, BORDER_DEFAULT)
+    mask = np.where(mask < 127, 0, 255).astype(np.uint8)
+    return mask
+
+def make_thumbnail(data: Union[bytes, PILImage, np.ndarray], max_width=320, max_height=320):
+    if isinstance(data, PILImage):
+        return_type = ReturnType.PILLOW
+        img = data
+    elif isinstance(data, bytes):
+        return_type = ReturnType.BYTES
+        img = Image.open(io.BytesIO(data)) ##imdecode(np.asarray(bytearray(data), dtype=np.uint8),
+                       # IMREAD_UNCHANGED)  # Image.open(io.BytesIO(data))
+    elif isinstance(data, np.ndarray):
+        return_type = ReturnType.NDARRAY
+        img = Image.fromarray(data)
+    else:
+        raise ValueError("Input type {} is not supported.".format(type(data)))
+
+    # Get the width and height of the image
+    width, height = img.size
+
+    # Set the new width and height of the image based on the maximum dimensions
+    if width > height:
+        if width > max_width:
+            height = int(height * (max_width / width))
+            width = max_width
+    else:
+        if height > max_height:
+            width = int(width * (max_height / height))
+            height = max_height
+
+    # Resize the image
+    img = img.resize((width, height), Image.ANTIALIAS)
+    if ReturnType.PILLOW == return_type:
+        return img
+
+    if ReturnType.NDARRAY == return_type:
+        return np.asarray(img)
+    
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG', quality=100)
+    byte_im = buf.getvalue()
+    return byte_im
 
 def remove(
     data: Union[bytes, PILImage, np.ndarray],
@@ -116,6 +191,7 @@ def remove(
     only_mask: bool = False,
     post_process_mask: bool = False,
 ) -> Union[bytes, PILImage, np.ndarray]:
+    """A dummy docstring."""
 
     if isinstance(data, PILImage):
         return_type = ReturnType.PILLOW
@@ -174,3 +250,65 @@ def remove(
     bio.seek(0)
 
     return bio.read()
+
+
+def remove_new(
+    data: Union[bytes, np.ndarray],
+    alpha_matting: bool = False,
+    alpha_matting_foreground_threshold: int = 240,
+    alpha_matting_background_threshold: int = 10,
+    alpha_matting_erode_size: int = 10,
+    session: Optional[BaseSession] = None,
+    only_mask: bool = False,
+    post_process_mask: bool = False,
+) -> Union[bytes, np.ndarray]:
+    """A dummy docstring."""
+    if isinstance(data, bytes):
+        return_type = ReturnType.BYTES
+        img = cv2.imdecode(np.asarray(
+            bytearray(data), dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+    elif isinstance(data, np.ndarray):
+        return_type = ReturnType.NDARRAY
+        img = data
+    else:
+        raise ValueError("Input type {} is not supported.".format(type(data)))
+
+    if session is None:
+        session = new_session("u2net")
+
+    masks = session.predict(img)
+    cutouts = []
+
+    for mask in masks:
+        if post_process_mask:
+            mask = post_process(mask)
+
+        if only_mask:
+            cutout = mask
+
+        elif alpha_matting:
+            try:
+                cutout = alpha_matting_cutout(
+                    img,
+                    mask,
+                    alpha_matting_foreground_threshold,
+                    alpha_matting_background_threshold,
+                    alpha_matting_erode_size,
+                )
+            except ValueError:
+                cutout = naive_cutout(img, mask)
+
+        else:
+            cutout = naive_cutout(img, mask)
+
+        cutouts.append(cutout)
+
+    cutout = img
+    if len(cutouts) > 0:
+        cutout = get_concat_v_multi(cutouts)
+
+    if ReturnType.NDARRAY == return_type:
+        return cutout
+
+    _, buffer = cv2.imencode('.png', cutout)
+    return buffer.tobytes()
